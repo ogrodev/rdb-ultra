@@ -1,0 +1,44 @@
+services:
+  lb:
+    image: haproxy:2.9-alpine
+    container_name: rdb-ultra-lb
+    ports:
+      - "9999:9999"
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on:
+      - api1
+      - api2
+    deploy:
+      resources:
+        limits:
+          cpus: "0.20"
+          memory: "20MB"
+    cpus: "0.20"
+    mem_limit: 20m
+
+  api1:
+    image: ${API_IMAGE:-ogrodev/rdb-ultra:latest}
+    container_name: rdb-ultra-api-1
+    environment:
+      API_ADDR: 0.0.0.0:8080
+    deploy:
+      resources:
+        limits:
+          cpus: "0.40"
+          memory: "165MB"
+    cpus: "0.40"
+    mem_limit: 165m
+
+  api2:
+    image: ${API_IMAGE:-ogrodev/rdb-ultra:latest}
+    container_name: rdb-ultra-api-2
+    environment:
+      API_ADDR: 0.0.0.0:8080
+    deploy:
+      resources:
+        limits:
+          cpus: "0.40"
+          memory: "165MB"
+    cpus: "0.40"
+    mem_limit: 165m

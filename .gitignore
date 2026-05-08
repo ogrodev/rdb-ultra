@@ -1,0 +1,5 @@
+/target/
+/resources/references.json.gz
+/resources/references.ridx
+/test/test-data.json
+/test/test/results.json

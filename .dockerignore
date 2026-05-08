@@ -1,0 +1,7 @@
+/target
+/.git
+/.gitignore
+/tests
+/test
+/resources
+*.ridx
