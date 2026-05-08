@@ -4,7 +4,19 @@
 
 `rdb-ultra` is a Rust submission for Rinha de Backend 2026. The challenge requires a fraud-detection API behind a load balancer, with at least two API instances, under a total resource budget of 1 CPU and 350 MB.
 
-The current architecture is optimized for the supplied k6 scoring path: low p99 latency, zero or near-zero HTTP errors, and low weighted detection error.
+The current architecture optimizes the supplied k6 scoring path: low p99 latency, zero or near-zero HTTP errors, and low weighted detection error.
+
+## Architecture guarantee
+
+This architecture guarantees a deployable challenge-shaped service:
+
+- one external load balancer on port `9999`
+- two API instances behind it
+- resource limits that sum to `1 CPU` and `350MB`
+- Rust API handlers for `/ready` and `/fraud-score`
+- fast classifier-based decisions
+
+It does not guarantee exact runtime k=5 nearest-neighbor parity. That is an explicit tradeoff.
 
 ## Runtime topology
 
@@ -25,20 +37,29 @@ Services are defined in `docker-compose.yml`:
 
 Total: `1.00 CPU`, `350MB`.
 
+If these numbers change, update this table and re-run compose validation.
+
 ## Load balancer
 
 HAProxy is configured in `haproxy.cfg`.
 
-It performs only infrastructure duties:
+Responsibilities:
 
-- listens on `:9999`
-- routes to `api1:8080` and `api2:8080`
-- uses round-robin balancing
-- runs `/ready` health checks
-- keeps client and backend connections alive
-- reuses backend HTTP connections
+- listen on `:9999`
+- route to `api1:8080` and `api2:8080`
+- distribute in round-robin
+- run `/ready` health checks
+- keep client and backend connections alive
+- reuse backend HTTP connections
 
-It must not contain fraud-detection logic. This is a challenge rule.
+Forbidden responsibilities:
+
+- inspecting fraud payloads
+- branching on transaction fields
+- computing or caching fraud decisions
+- returning `/fraud-score` directly
+
+If HAProxy contains business logic, the submission violates the challenge architecture rule.
 
 ## API server
 
@@ -100,7 +121,7 @@ If the fast byte parser cannot extract the required fields, the engine falls bac
 
 ## Reference/vector infrastructure
 
-The repo still contains the exact/vector-search infrastructure:
+The repo still contains exact/vector-search infrastructure:
 
 - `src/vectorize.rs` — challenge-compliant 14-dimensional vectorization
 - `src/index.rs` — quantized reference representation and exact top-5 scan
@@ -108,6 +129,8 @@ The repo still contains the exact/vector-search infrastructure:
 - `src/bin/build_index.rs` — converts `references.json.gz` into `references.ridx`
 
 This code is retained for validation, experimentation, and future index-based strategies. The current Docker runtime does not ship or load `references.ridx`.
+
+Do not delete this code just because it is not hot-path. It is the fallback route if exactness becomes more important than the current latency strategy.
 
 ## Build image
 
@@ -119,6 +142,38 @@ The `Dockerfile` builds a small runtime image:
 - copied artifact: `/usr/local/bin/rinha-api`
 
 The runtime image does not bundle challenge datasets.
+
+## Change boundaries
+
+### Safe local changes
+
+- Rust implementation changes with tests and validation
+- HAProxy tuning that preserves pure load balancing
+- Docker build improvements that keep image name and linux-amd64 compatibility
+- Documentation updates that do not claim unverified behavior
+
+### High-risk changes
+
+- detection threshold changes
+- switching from classifier to exact/ANN search
+- changing resource allocation
+- changing HAProxy health-check behavior
+- changing HTTP keep-alive behavior
+- adding dependencies that increase image size, memory, or startup cost
+
+High-risk changes require k6 validation before claiming improvement.
+
+## Observability and proof
+
+For architecture claims, use these proofs:
+
+- topology/resource claim: `docker-compose.yml` and `docker compose config --quiet`
+- LB behavior claim: `haproxy.cfg`
+- API behavior claim: Rust tests and smoke request through `:9999`
+- score claim: `test/test/results.json`
+- image claim: Docker build output
+
+Do not infer runtime behavior from code inspection alone when a command can prove it.
 
 ## Caveat
 

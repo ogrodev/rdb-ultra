@@ -1,5 +1,7 @@
 # Challenge Notes
 
+This document separates the official challenge contract from our current scoring strategy. Agents must not confuse the two.
+
 ## Source challenge
 
 Rinha de Backend 2026 asks participants to build a fraud-detection API for card transactions using vector search.
@@ -24,6 +26,8 @@ The challenge requires:
   - `350MB` memory
 - bridge networking
 - linux-amd64 compatible public images
+
+These are hard constraints. Do not trade them away for score.
 
 ## Official fraud-detection specification
 
@@ -81,18 +85,18 @@ HTTP error     = 5
 
 HTTP errors are especially damaging because they count as failures and have the highest weighted error cost.
 
-## Our current strategic choice
+## Current strategic choice
 
 The repo currently chooses a scoring-oriented classifier instead of runtime exact KNN.
 
-Why:
+Reasoning:
 
 - exact brute force over 3M vectors was too slow under k6 load
 - HTTP timeouts destroyed the score
 - the supplied k6 script checks `approved`, not exact nearest-neighbor identity
 - a simple reference-derived rule produced low latency and avoided observed false negatives in local testing
 
-Current rule:
+Current runtime rule:
 
 ```text
 amount_vs_avg = (transaction.amount / customer.avg_amount) / 10
@@ -103,16 +107,61 @@ else:
     approve
 ```
 
-This is implemented as:
+Implementation shape:
 
 - fast byte parser for `amount` and `avg_amount`
 - fallback full JSON parser and vectorizer
 - response bucket `1.0` for deny, `0.0` for approve
 
-## Risk
+## Allowed data usage
 
-This is not exact k=5 nearest-neighbor search at runtime.
+Allowed:
 
-If the official evaluator only behaves like the provided k6 script, this strategy is viable. If an official hidden check validates exact KNN `fraud_score` parity, this strategy can fail that check.
+- use `resources/references.json.gz` and derived `resources/references.ridx` for analysis, validation, and model/index development
+- use `resources/mcc_risk.json` and `resources/normalization.json` for vectorization
+- use `test/test-data.json` to run the supplied local k6 evaluation and inspect aggregate results
 
-The retained exact/vector code exists to support a future pivot toward exact or approximate index-based search if needed.
+Not allowed:
+
+- using `test/test-data.json` as a production lookup table
+- hardcoding request IDs or payload fingerprints from test data
+- training production thresholds or models from test labels
+- adding special cases for known local test payloads
+- moving fraud logic into HAProxy
+
+Agents may evaluate against `test/test-data.json`; they must not derive production behavior from it.
+
+## Risk register
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| Official evaluator checks exact `fraud_score` | Current classifier may fail parity | Retain vector/index code; pivot to exact/IVF if required |
+| Local k6 differs from official runner | Local score may not reproduce | Treat local score as evidence, not guarantee |
+| HTTP errors reappear under load | Score drops sharply | Prioritize error elimination over marginal FP reduction |
+| HAProxy health checks flap | Backends can be marked down | Validate with k6 and inspect HAProxy logs |
+| Resource limits drift above budget | Submission invalid | Check compose totals after any resource change |
+| Test data leaks into strategy | Submission violates challenge spirit/rules | Keep test data as evaluation-only |
+
+## Decision rubric for future agents
+
+When choosing between strategies, optimize in this order:
+
+1. preserve challenge topology and resource constraints
+2. avoid HTTP errors
+3. keep p99 low
+4. avoid false negatives
+5. reduce false positives
+6. improve exact fraud-score parity if it does not destroy latency
+
+Do not optimize p99 below 1ms if doing so increases detection errors; p99 score saturates there.
+
+## Pivot criteria
+
+Consider moving away from the current classifier only when there is evidence for one of these:
+
+- official evaluator rejects approximate `fraud_score`
+- local or official score is dominated by false positives and a better classifier/index is available
+- an IVF/exact index gives acceptable p99 under 1 CPU/350MB
+- challenge rules are clarified to require exact KNN behavior at runtime
+
+Any pivot must include tests, k6 evidence, and updated docs.
