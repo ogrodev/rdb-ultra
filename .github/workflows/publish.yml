@@ -42,8 +42,21 @@ jobs:
           context: .
           platforms: linux/amd64
           push: true
+          labels: |
+            org.opencontainers.image.source=https://github.com/ogrodev/rdb-ultra
+            org.opencontainers.image.licenses=MIT
           tags: |
             ghcr.io/ogrodev/rdb-ultra:${{ steps.vers.outputs.tag }}
             ghcr.io/ogrodev/rdb-ultra:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Make package public
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api --method PATCH \
+            -H "Accept: application/vnd.github+json" \
+            "/user/packages/container/rdb-ultra" \
+            -f visibility=public || true
