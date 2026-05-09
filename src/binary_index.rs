@@ -98,6 +98,14 @@ impl HourBucketIndex {
         }
         Ok(Self { buckets })
     }
+
+    pub fn warmup(&self) {
+        let query: QuantizedVector = [0; PADDED_DIMS];
+        for bucket in &self.buckets {
+            let decision = bucket.decide_quantized(&query);
+            std::hint::black_box(decision);
+        }
+    }
 }
 
 impl NearestNeighbors for HourBucketIndex {

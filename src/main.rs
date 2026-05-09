@@ -18,11 +18,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let engine = match env::var_os("SUPPORT_INDEX_PATH") {
-        Some(path) => Arc::new(FraudEngine::new(
-            HourBucketIndex::open_dir(path)?,
-            normalization,
-            mcc_risk,
-        )),
+        Some(path) => {
+            let support = HourBucketIndex::open_dir(path)?;
+            support.warmup();
+            Arc::new(FraudEngine::new(support, normalization, mcc_risk))
+        }
         None => Arc::new(FraudEngine::without_index(normalization, mcc_risk)),
     };
 
