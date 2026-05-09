@@ -18,7 +18,7 @@ services:
     mem_limit: 20m
 
   api1:
-    image: ${API_IMAGE:-ogrodev/rdb-ultra:latest}
+    image: ${API_IMAGE:-ghcr.io/ogrodev/rdb-ultra:latest}
     container_name: rdb-ultra-api-1
     environment:
       API_ADDR: 0.0.0.0:8080
@@ -31,7 +31,7 @@ services:
     mem_limit: 165m
 
   api2:
-    image: ${API_IMAGE:-ogrodev/rdb-ultra:latest}
+    image: ${API_IMAGE:-ghcr.io/ogrodev/rdb-ultra:latest}
     container_name: rdb-ultra-api-2
     environment:
       API_ADDR: 0.0.0.0:8080

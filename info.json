@@ -1,0 +1,7 @@
+{
+  "participants": ["ogrodev"],
+  "social": ["https://github.com/ogrodev"],
+  "source-code-repo": "https://github.com/ogrodev/rdb-ultra",
+  "stack": ["rust", "haproxy", "mmap"],
+  "open_to_work": false
+}

@@ -1,0 +1,49 @@
+name: publish-image
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute version tag
+        id: vers
+        run: |
+          ref="${GITHUB_REF##*/}"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "tag=${ref#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=$(date -u +%Y%m%d%H%M%S)-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push amd64 image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/ogrodev/rdb-ultra:${{ steps.vers.outputs.tag }}
+            ghcr.io/ogrodev/rdb-ultra:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
