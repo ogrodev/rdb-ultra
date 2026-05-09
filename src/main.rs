@@ -1,7 +1,8 @@
 use std::{env, sync::Arc};
 
 use rinha_backend_v2::{
-    engine::FraudEngine, http::serve, mcc::MccRisk, normalization::Normalization,
+    binary_index::HourBucketIndex, engine::FraudEngine, http::serve, mcc::MccRisk,
+    normalization::Normalization,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -16,7 +17,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => MccRisk::standard(),
     };
 
-    let engine = Arc::new(FraudEngine::without_index(normalization, mcc_risk));
+    let engine = match env::var_os("SUPPORT_INDEX_PATH") {
+        Some(path) => Arc::new(FraudEngine::new(
+            HourBucketIndex::open_dir(path)?,
+            normalization,
+            mcc_risk,
+        )),
+        None => Arc::new(FraudEngine::without_index(normalization, mcc_risk)),
+    };
 
     serve(&addr, engine)?;
     Ok(())

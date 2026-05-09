@@ -5,3 +5,5 @@
 /test
 /resources
 *.ridx
+/model/support.idx
+/model/grid.idx

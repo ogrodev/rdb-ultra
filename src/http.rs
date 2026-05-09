@@ -10,6 +10,16 @@ use crate::{engine::FraudEngine, index::Decision};
 
 const MAX_REQUEST_BYTES: usize = 1_048_576;
 
+const BAD_REQUEST_RESPONSE: &[u8] = b"HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\n{}";
+const NOT_FOUND_RESPONSE: &[u8] = b"HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\n{}";
+const READY_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\n{}";
+const APPROVED_0_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 35\r\nConnection: keep-alive\r\n\r\n{\"approved\":true,\"fraud_score\":0.0}";
+const APPROVED_1_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 35\r\nConnection: keep-alive\r\n\r\n{\"approved\":true,\"fraud_score\":0.2}";
+const APPROVED_2_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 35\r\nConnection: keep-alive\r\n\r\n{\"approved\":true,\"fraud_score\":0.4}";
+const DENIED_3_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 36\r\nConnection: keep-alive\r\n\r\n{\"approved\":false,\"fraud_score\":0.6}";
+const DENIED_4_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 36\r\nConnection: keep-alive\r\n\r\n{\"approved\":false,\"fraud_score\":0.8}";
+const DENIED_5_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 36\r\nConnection: keep-alive\r\n\r\n{\"approved\":false,\"fraud_score\":1.0}";
+
 pub fn serve(addr: &str, engine: Arc<FraudEngine>) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr)?;
     for stream in listener.incoming() {
@@ -31,8 +41,8 @@ fn handle_stream(mut stream: TcpStream, engine: &FraudEngine) -> std::io::Result
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
     while let Some(request) = read_http_request(&mut stream)? {
         let close_after_response = request_has_connection_close(&request);
-        let response = handle_http_request(&request, engine);
-        stream.write_all(&response)?;
+        let response = handle_http_request_bytes(&request, engine);
+        stream.write_all(response)?;
         if close_after_response {
             break;
         }
@@ -41,31 +51,35 @@ fn handle_stream(mut stream: TcpStream, engine: &FraudEngine) -> std::io::Result
 }
 
 pub fn handle_http_request(request: &[u8], engine: &FraudEngine) -> Vec<u8> {
+    handle_http_request_bytes(request, engine).to_vec()
+}
+
+fn handle_http_request_bytes(request: &[u8], engine: &FraudEngine) -> &'static [u8] {
     let Some(header_end) = find_header_end(request) else {
-        return status_response("400 Bad Request", b"{}");
+        return BAD_REQUEST_RESPONSE;
     };
     let header = &request[..header_end];
     let body = &request[header_end + 4..];
     let Ok(header_text) = std::str::from_utf8(header) else {
-        return status_response("400 Bad Request", b"{}");
+        return BAD_REQUEST_RESPONSE;
     };
     let mut lines = header_text.lines();
     let Some(request_line) = lines.next() else {
-        return status_response("400 Bad Request", b"{}");
+        return BAD_REQUEST_RESPONSE;
     };
     let mut parts = request_line.split_ascii_whitespace();
     let method = parts.next().unwrap_or_default();
     let path = parts.next().unwrap_or_default();
 
     match (method, path) {
-        ("GET", "/ready") => status_response("200 OK", b"{}"),
+        ("GET", "/ready") => READY_RESPONSE,
         ("POST", "/fraud-score") => {
             let decision = engine
                 .score_bytes(body)
                 .unwrap_or_else(|_| Decision::safe_fallback());
-            decision_response(decision)
+            decision_response_bytes(decision)
         }
-        _ => status_response("404 Not Found", b"{}"),
+        _ => NOT_FOUND_RESPONSE,
     }
 }
 
@@ -133,25 +147,13 @@ fn find_header_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
 }
 
-fn decision_response(decision: Decision) -> Vec<u8> {
-    let body: &'static [u8] = match decision.fraud_count.min(5) {
-        0 => b"{\"approved\":true,\"fraud_score\":0.0}",
-        1 => b"{\"approved\":true,\"fraud_score\":0.2}",
-        2 => b"{\"approved\":true,\"fraud_score\":0.4}",
-        3 => b"{\"approved\":false,\"fraud_score\":0.6}",
-        4 => b"{\"approved\":false,\"fraud_score\":0.8}",
-        _ => b"{\"approved\":false,\"fraud_score\":1.0}",
-    };
-    status_response("200 OK", body)
-}
-
-fn status_response(status: &str, body: &[u8]) -> Vec<u8> {
-    let mut response = Vec::with_capacity(128 + body.len());
-    response.extend_from_slice(b"HTTP/1.1 ");
-    response.extend_from_slice(status.as_bytes());
-    response.extend_from_slice(b"\r\nContent-Type: application/json\r\nContent-Length: ");
-    response.extend_from_slice(body.len().to_string().as_bytes());
-    response.extend_from_slice(b"\r\nConnection: keep-alive\r\n\r\n");
-    response.extend_from_slice(body);
-    response
+fn decision_response_bytes(decision: Decision) -> &'static [u8] {
+    match decision.fraud_count.min(5) {
+        0 => APPROVED_0_RESPONSE,
+        1 => APPROVED_1_RESPONSE,
+        2 => APPROVED_2_RESPONSE,
+        3 => DENIED_3_RESPONSE,
+        4 => DENIED_4_RESPONSE,
+        _ => DENIED_5_RESPONSE,
+    }
 }

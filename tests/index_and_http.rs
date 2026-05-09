@@ -150,3 +150,29 @@ fn engine_uses_fast_reference_derived_rule_for_high_amount_vs_average() {
     assert_eq!(decision.fraud_count, 5);
     assert!(!decision.approved);
 }
+
+#[test]
+fn engine_uses_support_index_for_high_ratio_support_window() {
+    let index = Arc::new(ReferenceIndex::from_records(vec![
+        ReferenceRecord::new(vector(0.1), false),
+        ReferenceRecord::new(vector(0.2), false),
+        ReferenceRecord::new(vector(0.3), false),
+        ReferenceRecord::new(vector(0.4), false),
+        ReferenceRecord::new(vector(0.5), false),
+    ]));
+    let engine = FraudEngine::new(index, Normalization::standard(), MccRisk::standard());
+    let payload = serde_json::json!({
+        "id": "tx-support-window",
+        "transaction": { "amount": 773.20, "installments": 3, "requested_at": "2026-03-22T18:47:28Z" },
+        "customer": { "avg_amount": 472.65, "tx_count_24h": 4, "known_merchants": ["MERC-008", "MERC-018"] },
+        "merchant": { "id": "MERC-008", "mcc": "5411", "avg_amount": 273.60 },
+        "terminal": { "is_online": true, "card_present": false, "km_from_home": 76.21 },
+        "last_transaction": { "timestamp": "2026-03-22T16:54:28Z", "km_from_current": 148.87 }
+    })
+    .to_string();
+
+    let decision = engine.score_bytes(payload.as_bytes()).unwrap();
+
+    assert_eq!(decision.fraud_count, 0);
+    assert!(decision.approved);
+}

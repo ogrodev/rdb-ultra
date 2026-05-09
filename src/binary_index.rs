@@ -84,6 +84,34 @@ impl NearestNeighbors for MmapIndex {
     }
 }
 
+pub struct HourBucketIndex {
+    buckets: Vec<MmapIndex>,
+}
+
+impl HourBucketIndex {
+    pub fn open_dir(path: impl AsRef<Path>) -> Result<Self, BinaryIndexError> {
+        let mut buckets = Vec::with_capacity(24);
+        for hour in 0..24 {
+            let file_name = format!("support-h{hour:02}.idx");
+            let mmap = MmapIndex::open(path.as_ref().join(file_name))?;
+            buckets.push(mmap);
+        }
+        Ok(Self { buckets })
+    }
+}
+
+impl NearestNeighbors for HourBucketIndex {
+    fn decide_quantized(&self, query: &QuantizedVector) -> crate::index::Decision {
+        let hour = quantized_hour_bucket(query[3]);
+        self.buckets[hour].decide_quantized(query)
+    }
+}
+
+fn quantized_hour_bucket(hour: i16) -> usize {
+    let clamped = i32::from(hour).clamp(0, 10_000);
+    ((clamped * 23 + 5_000) / 10_000) as usize
+}
+
 pub fn write_index(
     path: impl AsRef<Path>,
     vectors: &[QuantizedVector],

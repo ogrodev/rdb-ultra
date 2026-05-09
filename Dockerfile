@@ -13,8 +13,10 @@ WORKDIR /app
 
 RUN useradd --system --uid 10001 --home-dir /app rinha
 COPY --from=builder /src/target/release/rinha-api /usr/local/bin/rinha-api
+COPY model/hour /app/model/hour
 
 ENV API_ADDR=0.0.0.0:8080
+ENV SUPPORT_INDEX_PATH=/app/model/hour
 
 USER rinha
 EXPOSE 8080
