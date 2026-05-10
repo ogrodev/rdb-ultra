@@ -1,13 +1,13 @@
 use std::{
     env,
-    fs::File,
+    fs::{self, File},
     io::{BufReader, Read},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use flate2::read::GzDecoder;
 use rinha_backend_v2::{
-    binary_index::write_index,
+    binary_index::{write_index, MmapIndex},
     index::{quantize, QuantizedVector, DIMS},
 };
 use serde::{
@@ -22,24 +22,43 @@ struct ReferenceJson {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut args = env::args_os().skip(1);
-    let input = args
-        .next()
+    let args = env::args_os()
+        .skip(1)
         .map(PathBuf::from)
-        .ok_or("usage: build-index <references.json.gz> <output.ridx>")?;
-    let output = args
-        .next()
-        .map(PathBuf::from)
-        .ok_or("usage: build-index <references.json.gz> <output.ridx>")?;
-    if args.next().is_some() {
-        return Err("usage: build-index <references.json.gz> <output.ridx>".into());
+        .collect::<Vec<_>>();
+    match args.as_slice() {
+        [command, dir] if command == Path::new("--sort-hour-buckets") => {
+            sort_hour_buckets(dir)?;
+        }
+        [input, output] => {
+            let file = File::open(input)?;
+            let decoder = GzDecoder::new(BufReader::new(file));
+            let (vectors, labels) = read_references(decoder)?;
+            write_index(output, &vectors, &labels)?;
+            eprintln!("indexed {} reference vectors", vectors.len());
+        }
+        _ => {
+            return Err(
+                "usage: build-index <references.json.gz> <output.ridx> | build-index --sort-hour-buckets <model/hour>"
+                    .into(),
+            );
+        }
     }
+    Ok(())
+}
 
-    let file = File::open(&input)?;
-    let decoder = GzDecoder::new(BufReader::new(file));
-    let (vectors, labels) = read_references(decoder)?;
-    write_index(output, &vectors, &labels)?;
-    eprintln!("indexed {} reference vectors", vectors.len());
+fn sort_hour_buckets(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    for hour in 0..24 {
+        let path = dir.join(format!("support-h{hour:02}.idx"));
+        let (vectors, labels) = {
+            let index = MmapIndex::open(&path)?;
+            (index.vectors().to_vec(), index.labels().to_vec())
+        };
+        let tmp_path = dir.join(format!("support-h{hour:02}.idx.tmp"));
+        write_index(&tmp_path, &vectors, &labels)?;
+        fs::rename(&tmp_path, &path)?;
+        eprintln!("sorted {} vectors in {}", vectors.len(), path.display());
+    }
     Ok(())
 }
 

@@ -1,9 +1,27 @@
 use std::sync::Arc;
 
+pub use crate::distance::squared_distance;
+use crate::distance::squared_distance_fn;
+
 pub const DIMS: usize = 14;
 pub const PADDED_DIMS: usize = 16;
 pub const QUANT_SCALE: f32 = 10_000.0;
 pub type QuantizedVector = [i16; PADDED_DIMS];
+
+pub const KD_LEAF: u32 = u32::MAX;
+pub const KD_LEAF_SIZE: usize = 8;
+const KD_STACK_CAPACITY: usize = 128;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct KdNode {
+    pub start: u32,
+    pub end: u32,
+    pub left: u32,
+    pub right: u32,
+    pub min: [i16; DIMS],
+    pub max: [i16; DIMS],
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Decision {
@@ -125,15 +143,235 @@ pub fn decide_from_slices(
     debug_assert_eq!(vectors.len(), labels.len());
 
     let mut best_distances = [i64::MAX; 5];
+    let mut best_indices = [usize::MAX; 5];
     let mut best_labels = [0_u8; 5];
+    let distance_fn = squared_distance_fn();
 
     for (idx, vector) in vectors.iter().enumerate() {
-        let distance = squared_distance(query, vector);
-        if distance < best_distances[4] {
-            insert_best(distance, labels[idx], &mut best_distances, &mut best_labels);
+        let distance = distance_fn(query, vector);
+        if is_better_candidate(distance, idx, best_distances[4], best_indices[4]) {
+            insert_best(
+                distance,
+                idx,
+                labels[idx],
+                &mut best_distances,
+                &mut best_indices,
+                &mut best_labels,
+            );
         }
     }
 
+    decision_from_best(&best_distances, &best_labels)
+}
+
+pub fn decide_pruned_by_dim2(
+    query: &QuantizedVector,
+    vectors: &[QuantizedVector],
+    labels: &[u8],
+) -> Decision {
+    debug_assert_eq!(vectors.len(), labels.len());
+
+    let mut best_distances = [i64::MAX; 5];
+    let mut best_indices = [usize::MAX; 5];
+    let mut best_labels = [0_u8; 5];
+    let distance_fn = squared_distance_fn();
+
+    let pivot = vectors.partition_point(|vector| vector[2] < query[2]);
+    let mut left = pivot;
+    let mut right = pivot;
+
+    loop {
+        let left_bound = if left == 0 {
+            i64::MAX
+        } else {
+            dim2_distance(query, &vectors[left - 1])
+        };
+        let right_bound = if right == vectors.len() {
+            i64::MAX
+        } else {
+            dim2_distance(query, &vectors[right])
+        };
+
+        if left_bound == i64::MAX && right_bound == i64::MAX {
+            break;
+        }
+
+        if left_bound <= right_bound {
+            if left_bound > best_distances[4] {
+                break;
+            }
+            left -= 1;
+            let distance = distance_fn(query, &vectors[left]);
+            if is_better_candidate(distance, left, best_distances[4], best_indices[4]) {
+                insert_best(
+                    distance,
+                    left,
+                    labels[left],
+                    &mut best_distances,
+                    &mut best_indices,
+                    &mut best_labels,
+                );
+            }
+        } else {
+            if right_bound > best_distances[4] {
+                break;
+            }
+            let distance = distance_fn(query, &vectors[right]);
+            if is_better_candidate(distance, right, best_distances[4], best_indices[4]) {
+                insert_best(
+                    distance,
+                    right,
+                    labels[right],
+                    &mut best_distances,
+                    &mut best_indices,
+                    &mut best_labels,
+                );
+            }
+            right += 1;
+        }
+    }
+
+    decision_from_best(&best_distances, &best_labels)
+}
+
+pub fn decide_kd_tree(
+    query: &QuantizedVector,
+    vectors: &[QuantizedVector],
+    labels: &[u8],
+    nodes: &[KdNode],
+) -> Decision {
+    debug_assert_eq!(vectors.len(), labels.len());
+
+    if nodes.is_empty() {
+        return Decision::safe_fallback();
+    }
+
+    let mut best_distances = [i64::MAX; 5];
+    let mut best_indices = [usize::MAX; 5];
+    let mut best_labels = [0_u8; 5];
+    let distance_fn = squared_distance_fn();
+    let mut stack = [0_usize; KD_STACK_CAPACITY];
+    let mut stack_len = 1_usize;
+
+    while stack_len > 0 {
+        stack_len -= 1;
+        let node_idx = stack[stack_len];
+        let node = &nodes[node_idx];
+        if kd_node_bound(query, node) > best_distances[4] {
+            continue;
+        }
+
+        if node.left == KD_LEAF {
+            for idx in node.start as usize..node.end as usize {
+                let distance = distance_fn(query, &vectors[idx]);
+                if is_better_candidate(distance, idx, best_distances[4], best_indices[4]) {
+                    insert_best(
+                        distance,
+                        idx,
+                        labels[idx],
+                        &mut best_distances,
+                        &mut best_indices,
+                        &mut best_labels,
+                    );
+                }
+            }
+            continue;
+        }
+
+        let left_idx = node.left as usize;
+        let right_idx = node.right as usize;
+        let left_bound = kd_node_bound(query, &nodes[left_idx]);
+        let right_bound = kd_node_bound(query, &nodes[right_idx]);
+
+        if left_bound <= right_bound {
+            if right_bound <= best_distances[4] {
+                push_kd_node(&mut stack, &mut stack_len, right_idx);
+            }
+            if left_bound <= best_distances[4] {
+                push_kd_node(&mut stack, &mut stack_len, left_idx);
+            }
+        } else {
+            if left_bound <= best_distances[4] {
+                push_kd_node(&mut stack, &mut stack_len, left_idx);
+            }
+            if right_bound <= best_distances[4] {
+                push_kd_node(&mut stack, &mut stack_len, right_idx);
+            }
+        }
+    }
+
+    decision_from_best(&best_distances, &best_labels)
+}
+
+#[inline(always)]
+fn push_kd_node(stack: &mut [usize; KD_STACK_CAPACITY], stack_len: &mut usize, node_idx: usize) {
+    debug_assert!(*stack_len < stack.len());
+    stack[*stack_len] = node_idx;
+    *stack_len += 1;
+}
+
+#[inline(always)]
+fn kd_node_bound(query: &QuantizedVector, node: &KdNode) -> i64 {
+    let mut sum = 0_i64;
+    for (dim, &query_value) in query.iter().enumerate().take(DIMS) {
+        let nearest = if query_value < node.min[dim] {
+            node.min[dim]
+        } else if query_value > node.max[dim] {
+            node.max[dim]
+        } else {
+            query_value
+        };
+        let diff = i32::from(query_value) - i32::from(nearest);
+        sum += i64::from(diff * diff);
+    }
+    sum
+}
+
+#[inline(always)]
+fn dim2_distance(query: &QuantizedVector, vector: &QuantizedVector) -> i64 {
+    let diff = i32::from(query[2]) - i32::from(vector[2]);
+    i64::from(diff * diff)
+}
+
+#[inline(always)]
+fn is_better_candidate(
+    distance: i64,
+    index: usize,
+    worst_distance: i64,
+    worst_index: usize,
+) -> bool {
+    distance < worst_distance || (distance == worst_distance && index < worst_index)
+}
+
+#[inline(always)]
+fn insert_best(
+    distance: i64,
+    index: usize,
+    label: u8,
+    best_distances: &mut [i64; 5],
+    best_indices: &mut [usize; 5],
+    best_labels: &mut [u8; 5],
+) {
+    let mut position = 4;
+    while position > 0
+        && is_better_candidate(
+            distance,
+            index,
+            best_distances[position - 1],
+            best_indices[position - 1],
+        )
+    {
+        best_distances[position] = best_distances[position - 1];
+        best_indices[position] = best_indices[position - 1];
+        best_labels[position] = best_labels[position - 1];
+        position -= 1;
+    }
+    best_distances[position] = distance;
+    best_indices[position] = index;
+    best_labels[position] = label;
+}
+
+fn decision_from_best(best_distances: &[i64; 5], best_labels: &[u8; 5]) -> Decision {
     let fraud_count = best_labels
         .iter()
         .zip(best_distances.iter())
@@ -142,26 +380,4 @@ pub fn decide_from_slices(
         .sum::<u8>();
 
     Decision::from_fraud_count(fraud_count)
-}
-
-#[inline(always)]
-pub fn squared_distance(left: &QuantizedVector, right: &QuantizedVector) -> i64 {
-    let mut sum = 0_i64;
-    for idx in 0..DIMS {
-        let diff = i32::from(left[idx]) - i32::from(right[idx]);
-        sum += i64::from(diff * diff);
-    }
-    sum
-}
-
-#[inline(always)]
-fn insert_best(distance: i64, label: u8, best_distances: &mut [i64; 5], best_labels: &mut [u8; 5]) {
-    let mut position = 4;
-    while position > 0 && distance < best_distances[position - 1] {
-        best_distances[position] = best_distances[position - 1];
-        best_labels[position] = best_labels[position - 1];
-        position -= 1;
-    }
-    best_distances[position] = distance;
-    best_labels[position] = label;
 }
