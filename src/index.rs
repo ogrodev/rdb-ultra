@@ -9,7 +9,7 @@ pub const QUANT_SCALE: f32 = 10_000.0;
 pub type QuantizedVector = [i16; PADDED_DIMS];
 
 pub const KD_LEAF: u32 = u32::MAX;
-pub const KD_LEAF_SIZE: usize = 8;
+pub const KD_LEAF_SIZE: usize = 64;
 const KD_STACK_CAPACITY: usize = 128;
 
 #[repr(C)]
