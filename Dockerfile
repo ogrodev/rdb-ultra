@@ -5,6 +5,7 @@ WORKDIR /src
 
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+ENV RUSTFLAGS="-C target-cpu=x86-64-v3"
 RUN cargo build --release --locked
 
 
