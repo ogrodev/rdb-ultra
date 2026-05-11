@@ -303,6 +303,131 @@ pub fn decide_kd_tree(
     decision_from_best(&best_distances, &best_labels)
 }
 
+pub fn decide_from_soa(
+    query: &QuantizedVector,
+    dimensions: [&[i16]; DIMS],
+    labels: &[u8],
+) -> Decision {
+    debug_assert!(dimensions
+        .iter()
+        .all(|dimension| dimension.len() == labels.len()));
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx2") {
+            return unsafe { decide_from_soa_avx2(query, &dimensions, labels) };
+        }
+    }
+
+    decide_from_soa_scalar(query, &dimensions, labels)
+}
+
+fn decide_from_soa_scalar(
+    query: &QuantizedVector,
+    dimensions: &[&[i16]; DIMS],
+    labels: &[u8],
+) -> Decision {
+    let mut best_distances = [i64::MAX; 5];
+    let mut best_indices = [usize::MAX; 5];
+    let mut best_labels = [0_u8; 5];
+
+    for (idx, &label) in labels.iter().enumerate() {
+        let distance = squared_distance_soa_at(query, dimensions, idx);
+        if is_better_candidate(distance, idx, best_distances[4], best_indices[4]) {
+            insert_best(
+                distance,
+                idx,
+                label,
+                &mut best_distances,
+                &mut best_indices,
+                &mut best_labels,
+            );
+        }
+    }
+
+    decision_from_best(&best_distances, &best_labels)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn decide_from_soa_avx2(
+    query: &QuantizedVector,
+    dimensions: &[&[i16]; DIMS],
+    labels: &[u8],
+) -> Decision {
+    use std::arch::x86_64::{
+        __m128i, __m256i, _mm256_add_epi32, _mm256_cvtepi16_epi32, _mm256_mullo_epi32,
+        _mm256_setzero_si256, _mm256_storeu_si256, _mm_loadu_si128, _mm_set1_epi16, _mm_sub_epi16,
+    };
+
+    let mut best_distances = [i64::MAX; 5];
+    let mut best_indices = [usize::MAX; 5];
+    let mut best_labels = [0_u8; 5];
+    let mut idx = 0_usize;
+    while idx + 8 <= labels.len() {
+        let mut distances = _mm256_setzero_si256();
+        for dim in 0..DIMS {
+            let values = _mm_loadu_si128(dimensions[dim].as_ptr().add(idx).cast::<__m128i>());
+            let query_values = _mm_set1_epi16(query[dim]);
+            let diff_i16 = _mm_sub_epi16(query_values, values);
+            let diff_i32 = _mm256_cvtepi16_epi32(diff_i16);
+            let squared = _mm256_mullo_epi32(diff_i32, diff_i32);
+            distances = _mm256_add_epi32(distances, squared);
+        }
+
+        let mut lanes = [0_i32; 8];
+        _mm256_storeu_si256(lanes.as_mut_ptr().cast::<__m256i>(), distances);
+        for (lane, distance) in lanes.iter().enumerate() {
+            debug_assert!(*distance >= 0, "SOA AVX2 distance overflowed i32");
+            let candidate_idx = idx + lane;
+            let distance = i64::from(*distance);
+            if is_better_candidate(distance, candidate_idx, best_distances[4], best_indices[4]) {
+                insert_best(
+                    distance,
+                    candidate_idx,
+                    labels[candidate_idx],
+                    &mut best_distances,
+                    &mut best_indices,
+                    &mut best_labels,
+                );
+            }
+        }
+
+        idx += 8;
+    }
+
+    while idx < labels.len() {
+        let distance = squared_distance_soa_at(query, dimensions, idx);
+        if is_better_candidate(distance, idx, best_distances[4], best_indices[4]) {
+            insert_best(
+                distance,
+                idx,
+                labels[idx],
+                &mut best_distances,
+                &mut best_indices,
+                &mut best_labels,
+            );
+        }
+        idx += 1;
+    }
+
+    decision_from_best(&best_distances, &best_labels)
+}
+
+#[inline(always)]
+fn squared_distance_soa_at(
+    query: &QuantizedVector,
+    dimensions: &[&[i16]; DIMS],
+    idx: usize,
+) -> i64 {
+    let mut sum = 0_i64;
+    for dim in 0..DIMS {
+        let diff = i32::from(query[dim]) - i32::from(dimensions[dim][idx]);
+        sum += i64::from(diff * diff);
+    }
+    sum
+}
+
 #[inline(always)]
 fn push_kd_node(stack: &mut [usize; KD_STACK_CAPACITY], stack_len: &mut usize, node_idx: usize) {
     debug_assert!(*stack_len < stack.len());
