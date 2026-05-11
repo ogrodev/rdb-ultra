@@ -250,8 +250,8 @@ fn pruned_search_matches_full_scan_for_real_payload_samples_when_assets_present(
     let buckets = open_hour_buckets();
     for (hour, bucket) in buckets.iter().enumerate() {
         assert!(
-            bucket.supports_soa(),
-            "model/hour/support-h{hour:02}.idx must be regenerated as RINHIDX4 before running parity tests"
+            bucket.supports_kd_tree(),
+            "model/hour/support-h{hour:02}.idx must be regenerated as RINHIDX3 before running parity tests"
         );
     }
 

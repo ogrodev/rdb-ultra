@@ -9,14 +9,13 @@ use memmap2::Mmap;
 use thiserror::Error;
 
 use crate::index::{
-    decide_from_slices, decide_from_soa, decide_kd_tree, decide_pruned_by_dim2, KdNode,
-    NearestNeighbors, QuantizedVector, PADDED_DIMS,
+    decide_from_slices, decide_kd_tree, decide_pruned_by_dim2, KdNode, NearestNeighbors,
+    QuantizedVector, KD_LEAF, KD_LEAF_SIZE, PADDED_DIMS,
 };
 
 const MAGIC_V1: &[u8; 8] = b"RINHIDX1";
 const MAGIC_V2: &[u8; 8] = b"RINHIDX2";
 const MAGIC_V3: &[u8; 8] = b"RINHIDX3";
-const MAGIC_V4: &[u8; 8] = b"RINHIDX4";
 const HEADER_SIZE: usize = 4096;
 
 #[derive(Debug, Error)]
@@ -38,7 +37,6 @@ enum IndexFormat {
     Legacy,
     SortedByDim2,
     KdTree,
-    Soa,
 }
 
 pub struct MmapIndex {
@@ -47,8 +45,6 @@ pub struct MmapIndex {
     format: IndexFormat,
     node_count: usize,
     nodes_start: usize,
-    soa_start: usize,
-    labels_start: usize,
 }
 
 impl MmapIndex {
@@ -59,7 +55,6 @@ impl MmapIndex {
             return Err(BinaryIndexError::TooSmall);
         }
         let format = match &mmap[0..8] {
-            magic if magic == MAGIC_V4 => IndexFormat::Soa,
             magic if magic == MAGIC_V3 => IndexFormat::KdTree,
             magic if magic == MAGIC_V2 => IndexFormat::SortedByDim2,
             magic if magic == MAGIC_V1 => IndexFormat::Legacy,
@@ -83,18 +78,7 @@ impl MmapIndex {
 
         let vectors_len = checked_mul(len, size_of::<QuantizedVector>(), len_u64)?;
         let vectors_end = checked_add(HEADER_SIZE, vectors_len, len_u64)?;
-        let soa_start = vectors_end;
-        let soa_len = if format == IndexFormat::Soa {
-            checked_mul(
-                checked_mul(len, crate::index::DIMS, len_u64)?,
-                size_of::<i16>(),
-                len_u64,
-            )?
-        } else {
-            0
-        };
-        let labels_start = checked_add(soa_start, soa_len, len_u64)?;
-        let labels_end = checked_add(labels_start, len, len_u64)?;
+        let labels_end = checked_add(vectors_end, len, len_u64)?;
         let nodes_start = if format == IndexFormat::KdTree {
             align_up(labels_end, align_of::<KdNode>())
         } else {
@@ -114,8 +98,6 @@ impl MmapIndex {
             format,
             node_count,
             nodes_start,
-            soa_start,
-            labels_start,
         })
     }
 
@@ -135,10 +117,6 @@ impl MmapIndex {
         self.format == IndexFormat::KdTree
     }
 
-    pub fn supports_soa(&self) -> bool {
-        self.format == IndexFormat::Soa
-    }
-
     pub fn vectors(&self) -> &[QuantizedVector] {
         let byte_len = self.len * size_of::<QuantizedVector>();
         let bytes = &self.mmap[HEADER_SIZE..HEADER_SIZE + byte_len];
@@ -147,19 +125,8 @@ impl MmapIndex {
     }
 
     pub fn labels(&self) -> &[u8] {
-        &self.mmap[self.labels_start..self.labels_start + self.len]
-    }
-
-    pub fn dimensions(&self) -> [&[i16]; crate::index::DIMS] {
-        std::array::from_fn(|dim| self.dimension(dim))
-    }
-
-    fn dimension(&self, dim: usize) -> &[i16] {
-        let dim_len = self.len * size_of::<i16>();
-        let start = self.soa_start + dim * dim_len;
-        let bytes = &self.mmap[start..start + dim_len];
-        debug_assert_eq!(bytes.as_ptr().align_offset(size_of::<i16>()), 0);
-        unsafe { std::slice::from_raw_parts(bytes.as_ptr().cast::<i16>(), self.len) }
+        let start = HEADER_SIZE + self.len * size_of::<QuantizedVector>();
+        &self.mmap[start..start + self.len]
     }
 
     pub fn nodes(&self) -> &[KdNode] {
@@ -178,7 +145,6 @@ impl NearestNeighbors for MmapIndex {
         let vectors = self.vectors();
         let labels = self.labels();
         match self.format {
-            IndexFormat::Soa => decide_from_soa(query, self.dimensions(), labels),
             IndexFormat::KdTree => decide_kd_tree(query, vectors, labels, self.nodes()),
             IndexFormat::SortedByDim2 => decide_pruned_by_dim2(query, vectors, labels),
             IndexFormat::Legacy => decide_from_slices(query, vectors, labels),
@@ -233,17 +199,22 @@ pub fn write_index(
         "vectors and labels must have the same length"
     );
 
-    let entries: Vec<(QuantizedVector, u8)> = vectors
+    let mut entries: Vec<(QuantizedVector, u8)> = vectors
         .iter()
         .copied()
         .zip(labels.iter().copied())
         .collect();
+    let mut nodes = Vec::new();
+    if !entries.is_empty() {
+        build_kd_node(&mut entries, &mut nodes, 0, vectors.len())?;
+    }
 
     let file = File::create(path)?;
     let mut writer = BufWriter::new(file);
     let mut header = [0_u8; HEADER_SIZE];
-    header[0..8].copy_from_slice(MAGIC_V4);
+    header[0..8].copy_from_slice(MAGIC_V3);
     header[8..16].copy_from_slice(&(entries.len() as u64).to_le_bytes());
+    header[16..24].copy_from_slice(&(nodes.len() as u64).to_le_bytes());
     writer.write_all(&header)?;
 
     for (vector, _) in &entries {
@@ -251,15 +222,86 @@ pub fn write_index(
             writer.write_all(&value.to_le_bytes())?;
         }
     }
-    for dim in 0..crate::index::DIMS {
-        for (vector, _) in &entries {
-            writer.write_all(&vector[dim].to_le_bytes())?;
-        }
-    }
     for (_, label) in &entries {
         writer.write_all(std::slice::from_ref(label))?;
     }
+
+    let labels_end = HEADER_SIZE + entries.len() * size_of::<QuantizedVector>() + entries.len();
+    for _ in labels_end..align_up(labels_end, align_of::<KdNode>()) {
+        writer.write_all(&[0])?;
+    }
+
+    for node in &nodes {
+        write_node(&mut writer, node)?;
+    }
     writer.flush()?;
+    Ok(())
+}
+
+fn build_kd_node(
+    entries: &mut [(QuantizedVector, u8)],
+    nodes: &mut Vec<KdNode>,
+    start: usize,
+    end: usize,
+) -> Result<u32, BinaryIndexError> {
+    let (min, max) = bounding_box(&entries[start..end]);
+    let node_idx = u32::try_from(nodes.len())
+        .map_err(|_| BinaryIndexError::TooManyVectors(nodes.len() as u64))?;
+    nodes.push(KdNode {
+        start: u32::try_from(start).map_err(|_| BinaryIndexError::TooManyVectors(start as u64))?,
+        end: u32::try_from(end).map_err(|_| BinaryIndexError::TooManyVectors(end as u64))?,
+        left: KD_LEAF,
+        right: KD_LEAF,
+        min,
+        max,
+    });
+
+    if end - start > KD_LEAF_SIZE {
+        let split_dim = widest_dimension(&min, &max);
+        let mid = start + (end - start) / 2;
+        entries[start..end]
+            .select_nth_unstable_by_key(mid - start, |(vector, _)| vector[split_dim]);
+        let left = build_kd_node(entries, nodes, start, mid)?;
+        let right = build_kd_node(entries, nodes, mid, end)?;
+        let node = &mut nodes[node_idx as usize];
+        node.left = left;
+        node.right = right;
+    }
+
+    Ok(node_idx)
+}
+
+fn bounding_box(
+    entries: &[(QuantizedVector, u8)],
+) -> ([i16; crate::index::DIMS], [i16; crate::index::DIMS]) {
+    let mut min = [i16::MAX; crate::index::DIMS];
+    let mut max = [i16::MIN; crate::index::DIMS];
+    for (vector, _) in entries {
+        for dim in 0..crate::index::DIMS {
+            min[dim] = min[dim].min(vector[dim]);
+            max[dim] = max[dim].max(vector[dim]);
+        }
+    }
+    (min, max)
+}
+
+fn widest_dimension(min: &[i16; crate::index::DIMS], max: &[i16; crate::index::DIMS]) -> usize {
+    (0..crate::index::DIMS)
+        .max_by_key(|&dim| i32::from(max[dim]) - i32::from(min[dim]))
+        .expect("vector has at least one dimension")
+}
+
+fn write_node(writer: &mut impl Write, node: &KdNode) -> Result<(), std::io::Error> {
+    writer.write_all(&node.start.to_le_bytes())?;
+    writer.write_all(&node.end.to_le_bytes())?;
+    writer.write_all(&node.left.to_le_bytes())?;
+    writer.write_all(&node.right.to_le_bytes())?;
+    for value in node.min {
+        writer.write_all(&value.to_le_bytes())?;
+    }
+    for value in node.max {
+        writer.write_all(&value.to_le_bytes())?;
+    }
     Ok(())
 }
 
